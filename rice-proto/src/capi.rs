@@ -58,6 +58,7 @@ use crate::agent::AgentPoll;
 use crate::agent::{Agent, AgentError};
 use crate::candidate::{Candidate, CandidatePair, CandidateType, TransportType};
 use crate::component::ComponentConnectionState;
+use crate::consent;
 use crate::gathering::GatheredCandidate;
 use crate::stream::Credentials;
 #[cfg(feature = "dimpl")]
@@ -376,6 +377,85 @@ pub unsafe extern "C" fn rice_agent_set_ice_lite(agent: *const RiceAgent, ice_li
         let agent = Arc::from_raw(agent);
         let mut proto_agent = agent.proto_agent.lock().unwrap();
         proto_agent.set_ice_lite(ice_lite);
+
+        drop(proto_agent);
+        core::mem::forget(agent);
+    }
+}
+
+/// Retrieve the consent freshness configuration. If consent freshness
+/// is not enabled, both are set to 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rice_agent_get_consent_freshness_config(
+    agent: *const RiceAgent,
+    interval_nanos: *mut u64,
+    timeout_nanos: *mut u64,
+) {
+    unsafe {
+        let agent = Arc::from_raw(agent);
+        let proto_agent = agent.proto_agent.lock().unwrap();
+
+        *interval_nanos = 0;
+        *timeout_nanos = 0;
+
+        if let Some(config) = proto_agent.consent_freshness_config() {
+            *interval_nanos = config.interval.as_nanos() as u64;
+            *timeout_nanos = config.timeout.as_nanos() as u64;
+        }
+
+        drop(proto_agent);
+        core::mem::forget(agent);
+    }
+}
+
+/// Set the consent freshness configuration.
+///
+/// This should be called at build time, before ICE processing begins.
+/// `interval_nanos` is the check interval (default 5 s).
+/// `timeout_nanos` is the expiry timeout (default 30 s).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rice_agent_set_consent_freshness_config(
+    agent: *const RiceAgent,
+    interval_nanos: u64,
+    timeout_nanos: u64,
+) {
+    unsafe {
+        let agent = Arc::from_raw(agent);
+        let mut proto_agent = agent.proto_agent.lock().unwrap();
+
+        let config = consent::Config {
+            interval: Duration::from_nanos(interval_nanos),
+            timeout: Duration::from_nanos(timeout_nanos),
+        };
+        proto_agent.set_consent_freshness_config(config);
+
+        drop(proto_agent);
+        core::mem::forget(agent);
+    }
+}
+
+/// Enable consent freshness for this `RiceAgent`.
+///
+/// Consent freshness is enabled by default.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rice_agent_enable_consent_freshness(agent: *const RiceAgent) {
+    unsafe {
+        let agent = Arc::from_raw(agent);
+        let mut proto_agent = agent.proto_agent.lock().unwrap();
+        proto_agent.enable_consent_freshness();
+
+        drop(proto_agent);
+        core::mem::forget(agent);
+    }
+}
+
+/// Disable consent freshness for this `RiceAgent`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rice_agent_disable_consent_freshness(agent: *const RiceAgent) {
+    unsafe {
+        let agent = Arc::from_raw(agent);
+        let mut proto_agent = agent.proto_agent.lock().unwrap();
+        proto_agent.disable_consent_freshness();
 
         drop(proto_agent);
         core::mem::forget(agent);

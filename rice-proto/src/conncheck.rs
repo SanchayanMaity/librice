@@ -265,6 +265,8 @@ pub enum ConnCheckEvent {
     ComponentState(usize, ComponentConnectionState),
     /// A component has chosen a pair.  This pair should be used to send and receive data from.
     SelectedPair(usize, Box<SelectedPair>),
+    /// An authenticated consent check response was received for a component.
+    ConsentResponseReceived(usize, bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -451,32 +453,53 @@ impl ConnCheck {
         local_credentials: Credentials,
         remote_credentials: Credentials,
     ) -> Result<MessageWriteVec, StunError> {
-        let username = remote_credentials.ufrag.clone() + ":" + &local_credentials.ufrag;
-
-        // XXX: this needs to be the priority as if the candidate was peer-reflexive
-        let mut msg = Message::builder_request(BINDING, MessageWriteVec::new());
-        let priority = Priority::new(pair.local.priority);
-        msg.add_attribute(&priority)?;
-        let control = IceControlling::new(tie_breaker);
-        let controlled = IceControlled::new(tie_breaker);
-        if controlling {
-            msg.add_attribute(&control)?;
-        } else {
-            msg.add_attribute(&controlled)?;
-        }
-        let use_cand = UseCandidate::new();
-        if nominate {
-            msg.add_attribute(&use_cand)?;
-        }
-        let username = Username::new(&username)?;
-        msg.add_attribute(&username)?;
-        msg.add_message_integrity(
-            &MessageIntegrityCredentials::ShortTerm(remote_credentials.clone().into()),
-            IntegrityAlgorithm::Sha1,
-        )?;
-        msg.add_fingerprint()?;
-        Ok(msg)
+        generate_binding_request(
+            pair.local.priority,
+            nominate,
+            controlling,
+            tie_breaker,
+            local_credentials,
+            remote_credentials,
+        )
     }
+}
+
+pub(crate) fn generate_binding_request(
+    local_priority: u32,
+    nominate: bool,
+    controlling: bool,
+    tie_breaker: u64,
+    local_credentials: Credentials,
+    remote_credentials: Credentials,
+) -> Result<MessageWriteVec, StunError> {
+    let username = remote_credentials.ufrag.clone() + ":" + &local_credentials.ufrag;
+
+    // XXX: this needs to be the priority as if the candidate was peer-reflexive
+    let mut msg = Message::builder_request(BINDING, MessageWriteVec::new());
+    let priority = Priority::new(local_priority);
+
+    msg.add_attribute(&priority)?;
+
+    if controlling {
+        msg.add_attribute(&IceControlling::new(tie_breaker))?;
+    } else {
+        msg.add_attribute(&IceControlled::new(tie_breaker))?;
+    }
+
+    if nominate {
+        msg.add_attribute(&UseCandidate::new())?;
+    }
+
+    let username = Username::new(&username)?;
+
+    msg.add_attribute(&username)?;
+    msg.add_message_integrity(
+        &MessageIntegrityCredentials::ShortTerm(remote_credentials.clone().into()),
+        IntegrityAlgorithm::Sha1,
+    )?;
+    msg.add_fingerprint()?;
+
+    Ok(msg)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2209,6 +2232,8 @@ impl ConnCheckListSetBuilder {
             timing_advance: self.timing_advance,
             rto: self.rto,
             ice_lite: self.ice_lite,
+            consent_tids: Vec::new(),
+            consent_responses: Vec::new(),
         }
     }
 }
@@ -2235,6 +2260,10 @@ pub struct ConnCheckListSet {
     timing_advance: Duration,
     rto: Option<RequestRto>,
     ice_lite: bool,
+    /// Consent check TIDs: (tid, checklist_id, component_id).
+    consent_tids: Vec<(TransactionId, usize, usize)>,
+    /// Consent responses received since last poll: (checklist_id, component_id, consent_revoked).
+    consent_responses: Vec<(usize, usize, bool)>,
 }
 
 impl ConnCheckListSet {
@@ -2405,6 +2434,7 @@ impl ConnCheckListSet {
                                 msg: response.finish(),
                                 to: transmit.from,
                                 turn_id,
+                                consent_cid: None,
                             });
                         }
                         Err(reason) => {
@@ -2432,6 +2462,7 @@ impl ConnCheckListSet {
                         msg: response.finish(),
                         to: transmit.from,
                         turn_id,
+                        consent_cid: None,
                     });
                     true
                 }
@@ -3169,6 +3200,24 @@ impl ConnCheckListSet {
         response: &Message,
         from: SocketAddr,
     ) -> bool {
+        if let Some(pos) = self
+            .consent_tids
+            .iter()
+            .position(|(t, _, _)| *t == response.transaction_id())
+        {
+            let revoked = response.has_class(MessageClass::Error)
+                && response
+                    .attribute::<ErrorCode>()
+                    .ok()
+                    .is_some_and(|e| e.code() == ErrorCode::FORBIDDEN);
+            let (_, checklist_id, component_id) = self.consent_tids.swap_remove(pos);
+
+            self.consent_responses
+                .push((checklist_id, component_id, revoked));
+
+            return true;
+        }
+
         let checklist = &mut self.checklists[checklist_i];
         let checklist_id = checklist.checklist_id;
         // find conncheck
@@ -3339,6 +3388,7 @@ impl ConnCheckListSet {
                 is_request: true,
                 msg: stun_request.finish(),
                 to: remote_addr,
+                consent_cid: None,
             });
         Ok(None)
     }
@@ -3552,6 +3602,14 @@ impl ConnCheckListSet {
     /// [`CheckListSetPollRet::WaitUntil`] is returned.
     #[tracing::instrument(name = "check_set_poll", level = "debug", ret, skip(self))]
     pub fn poll(&mut self, now: Instant) -> CheckListSetPollRet {
+        // Drain pending consent freshness responses first.
+        if let Some((checklist_id, cid, revoked)) = self.consent_responses.pop() {
+            return CheckListSetPollRet::Event {
+                checklist_id,
+                event: ConnCheckEvent::ConsentResponseReceived(cid, revoked),
+            };
+        }
+
         if !self.pending_transmits.is_empty() || !self.pending_messages.is_empty() {
             trace!("have pending transmits/messages");
             return CheckListSetPollRet::WaitUntil(now);
@@ -3692,6 +3750,7 @@ impl ConnCheckListSet {
                                     msg: stun_request.finish(),
                                     turn_id: Some((pending.turn_id, pending.turn_addr)),
                                     to: pending.peer_addr,
+                                    consent_cid: None,
                                 });
                         }
                         TurnEvent::TcpConnectFailed(peer_addr) => {
@@ -4004,6 +4063,10 @@ impl ConnCheckListSet {
         }
 
         let rto = self.rto.clone();
+        // Collect consent TIDs to record after the mutable borrow on
+        // `checklist` is released.
+        let mut deferred_consent_tids: Vec<(TransactionId, usize, usize)> = Vec::new();
+
         while let Some(pending) = self.pending_messages.pop_back() {
             let Some(checklist) = self.mut_list(pending.checklist_id) else {
                 continue;
@@ -4019,6 +4082,14 @@ impl ConnCheckListSet {
                 );
                 match agent.send_request(pending.msg, pending.to, now) {
                     Ok(transmit) => {
+                        if let Some(cid) = pending.consent_cid {
+                            deferred_consent_tids.push((
+                                hdr.transaction_id(),
+                                pending.checklist_id,
+                                cid,
+                            ));
+                        }
+
                         let transport = transmit.transport;
                         let transmit =
                             transmit.reinterpret_data(|data| transmit_send(transport, data));
@@ -4051,6 +4122,9 @@ impl ConnCheckListSet {
                                 Err(e) => warn!("error sending: {e}"),
                             }
                         } else {
+                            if !deferred_consent_tids.is_empty() {
+                                self.consent_tids.append(&mut deferred_consent_tids);
+                            }
                             self.last_send_time = Some(now);
                             return Some(CheckListSetTransmit {
                                 checklist_id: pending.checklist_id,
@@ -4095,6 +4169,8 @@ impl ConnCheckListSet {
                 }
             }
         }
+
+        self.consent_tids.append(&mut deferred_consent_tids);
 
         if self
             .last_send_time
@@ -4323,6 +4399,7 @@ impl ConnCheckListSet {
                             msg: stun_request.finish(),
                             to,
                             turn_id: None,
+                            consent_cid: None,
                         });
 
                     let mut new_check = ConnCheck::new(
@@ -4385,6 +4462,7 @@ impl ConnCheckListSet {
             msg: response.finish(),
             to: ignorable.to,
             turn_id: ignorable.turn_id,
+            consent_cid: None,
         });
     }
 
@@ -4432,6 +4510,43 @@ impl ConnCheckListSet {
             checklist.close();
         }
         self.closed = true;
+    }
+
+    /// The tie-breaker value used in ICE‑CONTROLLING/ICE‑CONTROLLED attributes.
+    pub(crate) fn tie_breaker(&self) -> u64 {
+        self.tie_breaker
+    }
+
+    /// Queue a consent-freshness Binding Request to be sent through the
+    /// StunAgent that owns the connectivity state for `checklist_id`.
+    pub(crate) fn add_consent_check(
+        &mut self,
+        local: Candidate,
+        checklist_id: usize,
+        component_id: usize,
+        msg: Vec<u8>,
+        to: SocketAddr,
+    ) {
+        let Some(checklist) = self
+            .checklists
+            .iter_mut()
+            .find(|cl| cl.checklist_id == checklist_id)
+        else {
+            return;
+        };
+
+        let (agent_id, _) = checklist.find_or_create_udp_agent(&local, None);
+
+        self.pending_messages
+            .push_front(CheckListSetPendingMessage {
+                checklist_id,
+                agent_id,
+                is_request: true,
+                msg,
+                turn_id: None,
+                to,
+                consent_cid: Some(component_id),
+            });
     }
 }
 
@@ -4485,6 +4600,7 @@ struct CheckListSetPendingMessage {
     msg: Vec<u8>,
     turn_id: Option<(StunAgentId, SocketAddr)>,
     to: SocketAddr,
+    consent_cid: Option<usize>,
 }
 
 #[derive(Debug)]

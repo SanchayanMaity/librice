@@ -41,3 +41,19 @@ pub(crate) fn rand_u64() -> u64 {
         rng.random()
     }
 }
+
+pub(crate) fn rand_f64() -> f64 {
+    #[cfg(not(feature = "std"))]
+    {
+        use rand::Rng;
+        use rand::TryRngCore;
+        let mut rng = rand::rngs::OsRng.unwrap_err();
+        rng.random::<f64>()
+    }
+    #[cfg(feature = "std")]
+    {
+        use rand::Rng;
+        let mut rng = rand::rng();
+        rng.random::<f64>()
+    }
+}

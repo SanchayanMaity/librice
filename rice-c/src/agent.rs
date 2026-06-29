@@ -221,6 +221,46 @@ impl Agent {
         }
         Some(AgentTransmit::from_c_full(ret))
     }
+
+    /// Enable consent freshness.
+    pub fn enable_consent_freshness(&self) {
+        unsafe { crate::ffi::rice_agent_enable_consent_freshness(self.ffi) }
+    }
+
+    /// Disable consent freshness.
+    pub fn disable_consent_freshness(&self) {
+        unsafe { crate::ffi::rice_agent_disable_consent_freshness(self.ffi) }
+    }
+
+    /// Retrieve the consent freshness configuration.
+    ///
+    /// Returns `(interval, timeout)` as nanosecond durations.
+    pub fn consent_freshness_config(&self) -> (u64, u64) {
+        let mut interval_nanos = 0u64;
+        let mut timeout_nanos = 0u64;
+        unsafe {
+            crate::ffi::rice_agent_get_consent_freshness_config(
+                self.ffi,
+                &mut interval_nanos,
+                &mut timeout_nanos,
+            );
+        }
+        (interval_nanos, timeout_nanos)
+    }
+
+    /// Set the consent freshness configuration.
+    ///
+    /// This should be called at build time, before ICE processing begins.
+    pub fn set_consent_freshness_config(&self, interval: Duration, timeout: Duration) {
+        unsafe {
+            crate::ffi::rice_agent_set_consent_freshness_config(
+                self.ffi,
+                interval.as_nanos() as u64,
+                timeout.as_nanos() as u64,
+            );
+        }
+    }
+
     // TODO: stun_servers(), add_turn_server(), turn_servers(), stream()
 }
 
@@ -256,6 +296,7 @@ pub struct AgentBuilder {
     ice_lite: bool,
     timing_advance: Duration,
     rto: Option<RequestRto>,
+    consent_freshness: bool,
 }
 
 impl Default for AgentBuilder {
@@ -266,6 +307,7 @@ impl Default for AgentBuilder {
             ice_lite: false,
             timing_advance: Duration::from_millis(50),
             rto: None,
+            consent_freshness: true,
         }
     }
 }
@@ -281,6 +323,14 @@ impl AgentBuilder {
     /// controlling value may change.
     pub fn controlling(mut self, controlling: bool) -> Self {
         self.controlling = controlling;
+        self
+    }
+
+    /// Enable or disable consent freshness.
+    ///
+    /// Enabled by default.
+    pub fn consent_freshness(mut self, consent_freshness: bool) -> Self {
+        self.consent_freshness = consent_freshness;
         self
     }
 
@@ -342,6 +392,11 @@ impl AgentBuilder {
             let ffi = crate::ffi::rice_agent_new(self.controlling, self.trickle_ice);
             crate::ffi::rice_agent_set_timing_advance(ffi, self.timing_advance.as_nanos() as u64);
             crate::ffi::rice_agent_set_ice_lite(ffi, self.ice_lite);
+            if self.consent_freshness {
+                crate::ffi::rice_agent_enable_consent_freshness(ffi);
+            } else {
+                crate::ffi::rice_agent_disable_consent_freshness(ffi);
+            }
             let ret = Agent { ffi };
             if let Some(rto) = self.rto {
                 ret.set_request_retransmits(
