@@ -551,7 +551,7 @@ impl StreamState {
             stream.id = self.id
         )
     )]
-    fn add_component(&mut self) -> Result<usize, AgentError> {
+    pub(crate) fn add_component(&mut self) -> Result<usize, AgentError> {
         let index = self
             .components
             .iter()
@@ -583,7 +583,7 @@ impl StreamState {
         self.local_credentials = Some(credentials.clone());
     }
 
-    fn local_credentials(&self) -> Option<Credentials> {
+    pub(crate) fn local_credentials(&self) -> Option<Credentials> {
         self.local_credentials.clone()
     }
 
@@ -598,7 +598,7 @@ impl StreamState {
         self.remote_credentials = Some(credentials.clone());
     }
 
-    fn remote_credentials(&self) -> Option<Credentials> {
+    pub(crate) fn remote_credentials(&self) -> Option<Credentials> {
         self.remote_credentials.clone()
     }
 

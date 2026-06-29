@@ -34,7 +34,7 @@
 //!   Traversal Using Relays around NAT (TURN) Extension for IPv6
 //! - [x] [RFC6544](https://tools.ietf.org/html/rfc6544):
 //!   TCP Candidates with Interactive Connectivity Establishment (ICE)
-//! - [ ] [RFC7675](https://tools.ietf.org/html/rfc7675):
+//! - [x] [RFC7675](https://tools.ietf.org/html/rfc7675):
 //!   Session Traversal Utilities for NAT (STUN) Usage for Consent Freshness
 //! - [x] [RFC8445]: Interactive Connectivity Establishment (ICE): A Protocol
 //!   for Network Address Translator (NAT) Traversal

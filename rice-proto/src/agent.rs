@@ -27,6 +27,7 @@ use crate::component::ComponentConnectionState;
 use crate::conncheck::{
     CheckListSetPollRet, ConnCheckEvent, ConnCheckListSet, RequestRto, SelectedPair,
 };
+use crate::consent::{self, ConsentFreshness, ConsentFreshnessPoll};
 use crate::gathering::{GatherPoll, GatheredCandidate};
 use crate::rand::rand_u64;
 use crate::stream::{Stream, StreamMut, StreamState};
@@ -107,6 +108,8 @@ pub struct Agent {
     pub(crate) turn_servers: Vec<TurnConfig>,
     streams: Vec<StreamState>,
     pub(crate) rto: Option<RequestRto>,
+    pub(crate) consent_freshness: Option<ConsentFreshness>,
+    pub(crate) consent_freshness_cfg: consent::Config,
 }
 
 /// A builder for an [`Agent`]
@@ -117,6 +120,8 @@ pub struct AgentBuilder {
     timing_advance: Duration,
     rto: Option<RequestRto>,
     ice_lite: bool,
+    consent_freshness: bool,
+    consent_freshness_config: consent::Config,
 }
 
 impl Default for AgentBuilder {
@@ -127,6 +132,8 @@ impl Default for AgentBuilder {
             timing_advance: crate::conncheck::DEFAULT_MINIMUM_SET_TICK,
             rto: None,
             ice_lite: false,
+            consent_freshness: true,
+            consent_freshness_config: consent::Config::default(),
         }
     }
 }
@@ -197,6 +204,26 @@ impl AgentBuilder {
         self
     }
 
+    /// Whether consent freshness is enabled for this agent.
+    ///
+    /// Consent freshness is enabled by default but can be disabled using
+    /// this method. ICE-lite agents always skip consent freshness regardless
+    /// of this setting.
+    pub fn consent_freshness(mut self, consent_freshness: bool) -> Self {
+        self.consent_freshness = consent_freshness;
+        self
+    }
+
+    /// Configure the consent freshness interval and timeout.
+    ///
+    /// - `interval`: the period between Binding Requests (default 5 s).
+    /// - `timeout`: the period without traffic before consent is considered
+    ///   revoked (default 30 s).
+    pub fn consent_freshness_config(mut self, config: consent::Config) -> Self {
+        self.consent_freshness_config = config;
+        self
+    }
+
     /// Construct a new [`Agent`]
     pub fn build(self) -> Agent {
         turn_client_proto::types::debug_init();
@@ -213,6 +240,11 @@ impl AgentBuilder {
         if let Some(rto) = self.rto.clone() {
             checklistset.set_request_retransmits(rto);
         }
+
+        let consent_freshness = self
+            .consent_freshness
+            .then(|| ConsentFreshness::new(self.consent_freshness_config.clone()));
+
         Agent {
             id,
             checklistset,
@@ -220,6 +252,8 @@ impl AgentBuilder {
             turn_servers: Vec::new(),
             streams: Vec::new(),
             rto: self.rto,
+            consent_freshness,
+            consent_freshness_cfg: self.consent_freshness_config,
         }
     }
 }
@@ -352,6 +386,10 @@ impl Agent {
     pub fn close(&mut self, now: Instant) {
         info!("closing agent");
         self.checklistset.close(now);
+
+        if let Some(cf) = &mut self.consent_freshness {
+            cf.close();
+        }
     }
 
     /// The controlling state of this ICE agent.  This value may change throughout the ICE
@@ -567,12 +605,131 @@ impl Agent {
                         self.streams.iter().find(|s| s.checklist_id == checklist_id)
                     {
                         if stream.component_state(cid).is_some() {
+                            if !self.checklistset.ice_lite() {
+                                if let Some(cf) = &mut self.consent_freshness {
+                                    let pair = selected.candidate_pair();
+
+                                    if let (Some(local_creds), Some(remote_creds)) =
+                                        (stream.local_credentials(), stream.remote_credentials())
+                                    {
+                                        cf.start(
+                                            stream.id(),
+                                            cid,
+                                            pair.local.clone(),
+                                            pair.remote.address,
+                                            local_creds,
+                                            remote_creds,
+                                            self.checklistset.controlling(),
+                                            self.checklistset.tie_breaker(),
+                                            now,
+                                        );
+                                    } else {
+                                        warn!(
+                                            "missing credentials for stream {}, component {}",
+                                            stream.id(),
+                                            cid
+                                        );
+                                    }
+                                }
+                            }
+
                             return AgentPoll::SelectedPair(AgentSelectedPair {
                                 stream_id: stream.id(),
                                 component_id: cid,
                                 selected,
                             });
                         }
+                    }
+                }
+                CheckListSetPollRet::Event {
+                    checklist_id,
+                    event: ConnCheckEvent::ConsentResponseReceived(cid, revoked),
+                } => {
+                    if let Some(stream) =
+                        self.streams.iter().find(|s| s.checklist_id == checklist_id)
+                    {
+                        if let Some(cf) = &mut self.consent_freshness {
+                            cf.on_response(cid, now);
+
+                            if revoked {
+                                cf.on_revoked(stream.id(), cid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Poll consent freshness for timeout or expiry events.
+        if let Some(cf) = &mut self.consent_freshness {
+            loop {
+                match cf.poll(now) {
+                    ConsentFreshnessPoll::SendCheck {
+                        stream_id,
+                        component_id,
+                    } => {
+                        // Build the Binding Request and route it through
+                        // the conncheck's StunAgent for shared TID pool,
+                        // authentication, and RTT statistics.
+                        if let Some(check) = cf.build_consent_check(stream_id, component_id, now) {
+                            let checklist_id = self
+                                .streams
+                                .iter()
+                                .find(|s| s.id() == stream_id)
+                                .map(|s| s.checklist_id);
+
+                            if let Some(cl_id) = checklist_id {
+                                self.checklistset.add_consent_check(
+                                    check.local.clone(),
+                                    cl_id,
+                                    component_id,
+                                    check.msg,
+                                    check.to,
+                                );
+
+                                // Make poll_transmit pick up the newly
+                                // queued consent request.
+                                lowest_wait = Some(now);
+                            }
+                        }
+                        continue;
+                    }
+                    ConsentFreshnessPoll::ConsentExpired {
+                        stream_id,
+                        component_id,
+                    }
+                    | ConsentFreshnessPoll::ConsentRevoked {
+                        stream_id,
+                        component_id,
+                    } => {
+                        cf.stop(stream_id, component_id);
+
+                        if let Some(component) = self
+                            .streams
+                            .iter_mut()
+                            .find(|s| s.id() == stream_id)
+                            .and_then(|stream| stream.mut_component_state(component_id))
+                        {
+                            if component.set_state(ComponentConnectionState::Failed) {
+                                return AgentPoll::ComponentStateChange(
+                                    AgentComponentStateChange {
+                                        stream_id,
+                                        component_id,
+                                        state: ComponentConnectionState::Failed,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    ConsentFreshnessPoll::WaitUntil(wait) => {
+                        if let Some(check_wait) = lowest_wait {
+                            if wait < check_wait {
+                                lowest_wait = Some(wait);
+                            }
+                        } else {
+                            lowest_wait = Some(wait);
+                        }
+                        break;
                     }
                 }
             }
@@ -608,6 +765,40 @@ impl Agent {
                 transmit.transmit.from, transmit.transmit.to
             );
             None
+        }
+    }
+
+    /// If consent freshness is enabled for this [`Agent`]
+    pub fn is_consent_freshness_enabled(&self) -> bool {
+        self.consent_freshness.is_some()
+    }
+
+    /// Enable consent freshness for this [`Agent`]
+    pub fn enable_consent_freshness(&mut self) {
+        if self.consent_freshness.is_none() {
+            self.consent_freshness =
+                Some(ConsentFreshness::new(self.consent_freshness_cfg.clone()));
+        }
+    }
+
+    /// Disable consent freshness for this [`Agent`]
+    pub fn disable_consent_freshness(&mut self) {
+        self.consent_freshness = None;
+    }
+
+    /// Retrieve consent freshness configuration for this [`Agent`]
+    pub fn consent_freshness_config(&self) -> Option<consent::Config> {
+        self.consent_freshness
+            .as_ref()
+            .map(|cf| cf.config().clone())
+            .or_else(|| Some(self.consent_freshness_cfg.clone()))
+    }
+
+    /// Set consent freshness configuration for this [`Agent`]
+    pub fn set_consent_freshness_config(&mut self, config: consent::Config) {
+        self.consent_freshness_cfg = config.clone();
+        if let Some(cf) = &mut self.consent_freshness {
+            cf.set_config(config);
         }
     }
 }
@@ -740,5 +931,155 @@ mod tests {
         assert_eq!(agent.timing_advance(), ta);
         let agent = Agent::builder().timing_advance(ta).build();
         assert_eq!(agent.timing_advance(), ta);
+    }
+
+    #[test]
+    fn consent_expiry_sets_component_failed() {
+        use crate::candidate::{Candidate, CandidateType, TransportType};
+        use crate::conncheck::Credentials;
+
+        let _log = crate::tests::test_init_log();
+
+        let timeout = Duration::from_secs(5);
+        let config = consent::Config {
+            interval: Duration::from_secs(5),
+            timeout,
+        };
+        let mut agent = Agent::builder()
+            .controlling(true)
+            .consent_freshness_config(config)
+            .build();
+
+        let stream_id = agent.add_stream();
+        let _ = agent.streams[stream_id].add_component();
+        let component_id = 1;
+
+        let addr: SocketAddr = "10.0.0.1:1000".parse().unwrap();
+        let candidate = Candidate::builder(
+            component_id,
+            CandidateType::Host,
+            TransportType::Udp,
+            "foundation",
+            addr,
+        )
+        .priority(1234)
+        .build();
+
+        let local_creds = Credentials {
+            ufrag: "lufrag".into(),
+            passwd: "lpwd".into(),
+        };
+        let remote_creds = Credentials {
+            ufrag: "rufrag".into(),
+            passwd: "rpwd".into(),
+        };
+
+        let now = Instant::ZERO;
+        agent.consent_freshness.as_mut().unwrap().start(
+            stream_id,
+            component_id,
+            candidate,
+            "10.0.0.2:2000".parse().unwrap(),
+            local_creds,
+            remote_creds,
+            true,
+            42,
+            now,
+        );
+
+        match agent.poll(now + Duration::from_secs(1)) {
+            AgentPoll::WaitUntil(_) => {}
+            other => panic!("expected WaitUntil before expiry, got {other:?}"),
+        }
+
+        let after_expiry = now + timeout + Duration::from_secs(1);
+        match agent.poll(after_expiry) {
+            AgentPoll::ComponentStateChange(ev) => {
+                assert_eq!(ev.stream_id, stream_id);
+                assert_eq!(ev.component_id, component_id);
+                assert_eq!(ev.state, ComponentConnectionState::Failed);
+            }
+            other => panic!("expected ComponentStateChange(Failed) after expiry, got {other:?}"),
+        }
+
+        let component = agent.streams[stream_id]
+            .component_state(component_id)
+            .unwrap();
+        assert_eq!(component.state(), ComponentConnectionState::Failed);
+    }
+
+    #[test]
+    fn consent_revocation_sets_component_failed() {
+        use crate::candidate::{Candidate, CandidateType, TransportType};
+        use crate::conncheck::Credentials;
+
+        let _log = crate::tests::test_init_log();
+
+        let timeout = Duration::from_secs(30);
+        let config = consent::Config {
+            interval: Duration::from_secs(5),
+            timeout,
+        };
+        let mut agent = Agent::builder()
+            .controlling(true)
+            .consent_freshness_config(config)
+            .build();
+
+        let stream_id = agent.add_stream();
+        let _ = agent.streams[stream_id].add_component();
+        let component_id = 1;
+
+        let addr: SocketAddr = "10.0.0.1:1000".parse().unwrap();
+        let candidate = Candidate::builder(
+            component_id,
+            CandidateType::Host,
+            TransportType::Udp,
+            "foundation",
+            addr,
+        )
+        .priority(1234)
+        .build();
+
+        let local_creds = Credentials {
+            ufrag: "lufrag".into(),
+            passwd: "lpwd".into(),
+        };
+        let remote_creds = Credentials {
+            ufrag: "rufrag".into(),
+            passwd: "rpwd".into(),
+        };
+
+        let now = Instant::ZERO;
+        agent.consent_freshness.as_mut().unwrap().start(
+            stream_id,
+            component_id,
+            candidate,
+            "10.0.0.2:2000".parse().unwrap(),
+            local_creds,
+            remote_creds,
+            true,
+            42,
+            now,
+        );
+
+        agent
+            .consent_freshness
+            .as_mut()
+            .unwrap()
+            .on_revoked(stream_id, component_id);
+
+        match agent.poll(now) {
+            AgentPoll::ComponentStateChange(ev) => {
+                assert_eq!(ev.stream_id, stream_id);
+                assert_eq!(ev.component_id, component_id);
+                assert_eq!(ev.state, ComponentConnectionState::Failed);
+            }
+            other => panic!("expected ComponentStateChange(Failed) on revocation, got {other:?}"),
+        }
+
+        let component = agent.streams[stream_id]
+            .component_state(component_id)
+            .unwrap();
+        assert_eq!(component.state(), ComponentConnectionState::Failed);
     }
 }

@@ -301,6 +301,29 @@ impl Agent {
         self.inner.lock().unwrap().turn_servers.push(config);
         // TODO: propagate towards the gatherer as required
     }
+
+    /// Enable consent freshness.
+    pub fn enable_consent_freshness(&self) {
+        self.agent.enable_consent_freshness()
+    }
+
+    /// Disable consent freshness.
+    pub fn disable_consent_freshness(&self) {
+        self.agent.disable_consent_freshness()
+    }
+
+    /// Retrieve the consent freshness configuration.
+    pub fn consent_freshness_config(&self) -> (Duration, Duration) {
+        let (i, t) = self.agent.consent_freshness_config();
+        (Duration::from_nanos(i), Duration::from_nanos(t))
+    }
+
+    /// Set the consent freshness configuration.
+    ///
+    /// This should be called at build time, before ICE processing begins.
+    pub fn set_consent_freshness_config(&self, interval: Duration, timeout: Duration) {
+        self.agent.set_consent_freshness_config(interval, timeout)
+    }
 }
 
 #[derive(Debug, Default)]

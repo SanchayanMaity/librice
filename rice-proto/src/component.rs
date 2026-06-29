@@ -358,6 +358,11 @@ impl ComponentState {
             false
         }
     }
+
+    #[allow(dead_code)]
+    pub(crate) fn state(&self) -> ComponentConnectionState {
+        self.state
+    }
 }
 
 #[cfg(test)]
