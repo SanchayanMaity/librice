@@ -679,6 +679,10 @@ unsafe extern "C" {
     pub fn rice_agent_disable_consent_freshness(agent: *const RiceAgent);
 }
 unsafe extern "C" {
+    #[doc = " Manually revoke local consent for this component.\n\n Incoming Binding Requests from the peer will be answered with\n 403 Forbidden. Local user can continue to send consent checks\n to the remote peer (remote consent tracking is unaffected)."]
+    pub fn rice_component_revoke_consent(component: *const RiceComponent);
+}
+unsafe extern "C" {
     #[doc = " The number of bytes in a `RiceData`."]
     pub fn rice_data_len(data: *const RiceData) -> usize;
 }

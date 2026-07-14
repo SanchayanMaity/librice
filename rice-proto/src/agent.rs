@@ -1082,4 +1082,93 @@ mod tests {
             .unwrap();
         assert_eq!(component.state(), ComponentConnectionState::Failed);
     }
+
+    #[test]
+    fn revoke_consent_sets_local_flag() {
+        use crate::candidate::{Candidate, CandidateType, TransportType};
+        use crate::conncheck::Credentials;
+
+        let _log = crate::tests::test_init_log();
+
+        let config = consent::Config {
+            interval: Duration::from_secs(5),
+            timeout: Duration::from_secs(30),
+        };
+        let mut agent = Agent::builder()
+            .controlling(true)
+            .consent_freshness_config(config.clone())
+            .build();
+
+        let stream_id = agent.add_stream();
+        let _ = agent.streams[stream_id].add_component();
+        let component_id = 1;
+
+        let addr: SocketAddr = "10.0.0.1:1000".parse().unwrap();
+        let candidate = Candidate::builder(
+            component_id,
+            CandidateType::Host,
+            TransportType::Udp,
+            "foundation",
+            addr,
+        )
+        .priority(1234)
+        .build();
+
+        let local_creds = Credentials {
+            ufrag: "lufrag".into(),
+            passwd: "lpwd".into(),
+        };
+        let remote_creds = Credentials {
+            ufrag: "rufrag".into(),
+            passwd: "rpwd".into(),
+        };
+
+        let now = Instant::ZERO;
+        agent.consent_freshness.as_mut().unwrap().start(
+            stream_id,
+            component_id,
+            candidate,
+            "10.0.0.2:2000".parse().unwrap(),
+            local_creds,
+            remote_creds,
+            true,
+            42,
+            now,
+        );
+
+        let checklist_id = agent.streams[stream_id].checklist_id;
+        agent
+            .mut_stream(stream_id)
+            .unwrap()
+            .mut_component(component_id)
+            .unwrap()
+            .revoke_consent();
+
+        assert!(
+            agent
+                .checklistset
+                .is_local_consent_revoked(checklist_id, component_id)
+        );
+
+        // Verify consent freshness (remote consent tracking) is unaffected.
+        // After starting consent tracking, poll() should still produce a
+        // SendCheck.
+        match agent.poll(now + Duration::from_secs(1)) {
+            AgentPoll::WaitUntil(_) | AgentPoll::ComponentStateChange(_) => {}
+            other => panic!(
+                "expected WaitUntil or ComponentStateChange after revoke_consent, got {other:?}"
+            ),
+        }
+
+        // Verify that consent expiry still works (remote consent tracking unaffected).
+        let t_expire = now + config.timeout + Duration::from_secs(1);
+        match agent.poll(t_expire) {
+            AgentPoll::ComponentStateChange(ev) => {
+                assert_eq!(ev.state, ComponentConnectionState::Failed);
+            }
+            other => {
+                panic!("expected ComponentStateChange(Failed) after expiry, got {other:?}")
+            }
+        }
+    }
 }

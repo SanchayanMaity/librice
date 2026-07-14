@@ -150,6 +150,15 @@ impl Component {
             .clone()
             .map(|selected| selected.pair.clone())
     }
+
+    /// Revoke local consent for this component.
+    ///
+    /// Incoming Binding Requests from the peer will be answered with
+    /// 403 Forbidden. Local user can continue to send consent checks
+    /// to the remote peer (remote consent tracking is unaffected).
+    pub fn revoke_consent(&self) {
+        self.proto.revoke_consent()
+    }
 }
 
 #[derive(Debug)]

@@ -2234,6 +2234,7 @@ impl ConnCheckListSetBuilder {
             ice_lite: self.ice_lite,
             consent_tids: Vec::new(),
             consent_responses: Vec::new(),
+            local_consent_revoked: Vec::new(),
         }
     }
 }
@@ -2264,6 +2265,9 @@ pub struct ConnCheckListSet {
     consent_tids: Vec<(TransactionId, usize, usize)>,
     /// Consent responses received since last poll: (checklist_id, component_id, consent_revoked).
     consent_responses: Vec<(usize, usize, bool)>,
+    /// Local consent revocation: (checklist_id, component_id). When present,
+    /// incoming Binding Requests from peer are answered with 403 Forbidden.
+    local_consent_revoked: Vec<(usize, usize)>,
 }
 
 impl ConnCheckListSet {
@@ -2419,6 +2423,28 @@ impl ConnCheckListSet {
                     };
 
                     let checklist_id = self.checklists[checklist_i].checklist_id;
+
+                    // Check for local consent revocation, if local user has
+                    // revoked consent for this component, answer with 403.
+                    if self.is_local_consent_revoked(checklist_id, local_cand.component_id) {
+                        let code = ErrorCode::builder(ErrorCode::FORBIDDEN).build().unwrap();
+                        let mut response = Message::builder_error(&msg, MessageWriteVec::new());
+
+                        response.add_attribute(&code).unwrap();
+
+                        self.pending_messages.push_back(CheckListSetPendingMessage {
+                            checklist_id,
+                            agent_id,
+                            is_request: false,
+                            msg: response.finish(),
+                            to: transmit.from,
+                            turn_id,
+                            consent_cid: None,
+                        });
+
+                        return true;
+                    }
+
                     match self.handle_binding_request(
                         checklist_i,
                         &local_cand,
@@ -2551,6 +2577,22 @@ impl ConnCheckListSet {
                 Err(_) => {
                     if let Some(agent) = self.checklists[checklist_i].agent_by_id(agent_id) {
                         if agent.is_validated_peer(transmit.from) {
+                            let cl_id = self.checklists[checklist_i].checklist_id;
+
+                            if self.is_local_consent_revoked(cl_id, component_id) {
+                                trace!(
+                                    "dropping incoming data from {:?}: \
+                                     local consent revoked for checklist {cl_id} \
+                                     component {component_id}",
+                                    transmit.from
+                                );
+
+                                return HandleRecvReply {
+                                    handled: true,
+                                    ..Default::default()
+                                };
+                            }
+
                             return HandleRecvReply {
                                 handled: false,
                                 have_more_data: false,
@@ -2567,6 +2609,8 @@ impl ConnCheckListSet {
             TransportType::Tcp => {
                 // TODO: can potentially return a subset of the original data if the tcp buffer
                 // is empty and the incoming data contains at least one message.
+                let cl_id = self.checklists[checklist_i].checklist_id;
+                let local_consent_revoked = self.is_local_consent_revoked(cl_id, component_id);
                 let mut tcp_buffer = self.checklists[checklist_i]
                     .tcp_buffers
                     .entry((transmit.to, transmit.from))
@@ -2594,6 +2638,16 @@ impl ConnCheckListSet {
                             }
                         }
                         Err(_) => {
+                            if local_consent_revoked {
+                                trace!(
+                                    "dropping incoming data from {:?}: \
+                                     local consent revoked for checklist {cl_id} \
+                                     component {component_id}",
+                                    transmit.from
+                                );
+                                continue;
+                            }
+
                             let checklist = &mut self.checklists[checklist_i];
                             if let Some(agent) = checklist.agent_by_id(agent_id) {
                                 if agent.is_validated_peer(transmit.from) {
@@ -4547,6 +4601,27 @@ impl ConnCheckListSet {
                 to,
                 consent_cid: Some(component_id),
             });
+    }
+
+    /// Mark local consent as revoked for the given checklist/component.
+    /// Incoming Binding Requests from the peer will be answered with
+    /// 403 Forbidden.
+    pub(crate) fn revoke_local_consent(&mut self, checklist_id: usize, component_id: usize) {
+        let key = (checklist_id, component_id);
+
+        if !self.local_consent_revoked.contains(&key) {
+            self.local_consent_revoked.push(key);
+        }
+    }
+
+    /// Check whether local consent is revoked for given checklist/component.
+    pub(crate) fn is_local_consent_revoked(
+        &self,
+        checklist_id: usize,
+        component_id: usize,
+    ) -> bool {
+        self.local_consent_revoked
+            .contains(&(checklist_id, component_id))
     }
 }
 

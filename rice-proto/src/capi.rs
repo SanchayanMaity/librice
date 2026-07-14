@@ -462,6 +462,32 @@ pub unsafe extern "C" fn rice_agent_disable_consent_freshness(agent: *const Rice
     }
 }
 
+/// Manually revoke local consent for this component.
+///
+/// Incoming Binding Requests from the peer will be answered with
+/// 403 Forbidden. Local user can continue to send consent checks
+/// to the remote peer (remote consent tracking is unaffected).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rice_component_revoke_consent(component: *const RiceComponent) {
+    unsafe {
+        let component = Arc::from_raw(component);
+        let stream_id = component.stream_id;
+        let component_id = component.component_id;
+        let agent = component.proto_agent.clone();
+        core::mem::forget(component);
+
+        let mut proto_agent = agent.lock().unwrap();
+        let Some(mut stream) = proto_agent.mut_stream(stream_id) else {
+            return;
+        };
+        let Some(mut comp) = stream.mut_component(component_id) else {
+            return;
+        };
+
+        comp.revoke_consent();
+    }
+}
+
 /// Return value of `rice_agent_poll()`.
 #[derive(Debug)]
 #[repr(C)]

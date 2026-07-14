@@ -281,6 +281,23 @@ impl<'a> ComponentMut<'a> {
             Ok(transmit.reinterpret_data(|data| transmit_send(transport, data.as_ref())))
         }
     }
+
+    /// Revoke local consent for this component.
+    ///
+    /// Incoming Binding Requests from the peer will be answered with
+    /// 403 Forbidden. Local user will continue to send consent checks
+    /// to the remote peer (remote consent tracking is unaffected).
+    pub fn revoke_consent(&mut self) {
+        let stream = self.agent.stream_state(self.stream_id);
+        let Some(stream) = stream else {
+            return;
+        };
+        let checklist_id = stream.checklist_id;
+
+        self.agent
+            .checklistset
+            .revoke_local_consent(checklist_id, self.component_id);
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
