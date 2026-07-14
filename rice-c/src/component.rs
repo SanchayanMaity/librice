@@ -169,6 +169,15 @@ impl Component {
             Ok(AgentTransmit::from_c_full(transmit))
         }
     }
+
+    /// Revoke local consent for this component.
+    ///
+    /// Incoming Binding Requests from the peer will be answered with
+    /// 403 Forbidden. Local user can continue to send consent checks
+    /// to the remote peer (remote consent tracking is unaffected).
+    pub fn revoke_consent(&self) {
+        unsafe { crate::ffi::rice_component_revoke_consent(self.ffi) }
+    }
 }
 
 /// The state of a component
