@@ -336,4 +336,15 @@ mod tests {
         assert_eq!(from, local_addr);
         assert_eq!(recved, data);
     }
+
+    #[test]
+    fn revoke_consent() {
+        init();
+        #[cfg(feature = "runtime-tokio")]
+        let _runtime = crate::tests::tokio_runtime().enter();
+        let agent = crate::agent::Agent::default();
+        let stream = agent.add_stream();
+        let component = stream.add_component().unwrap();
+        component.revoke_consent();
+    }
 }

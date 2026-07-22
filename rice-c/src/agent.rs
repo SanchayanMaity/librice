@@ -734,4 +734,49 @@ mod tests {
             )
             .build();
     }
+
+    #[test]
+    fn consent_freshness_config_roundtrip() {
+        let _log = crate::tests::test_init_log();
+        let agent = Agent::builder().controlling(true).build();
+
+        let (interval, timeout) = agent.consent_freshness_config();
+        assert_eq!(interval, Duration::from_secs(5).as_nanos() as u64);
+        assert_eq!(timeout, Duration::from_secs(30).as_nanos() as u64);
+
+        agent.set_consent_freshness_config(Duration::from_secs(10), Duration::from_secs(60));
+
+        let (interval, timeout) = agent.consent_freshness_config();
+        assert_eq!(interval, Duration::from_secs(10).as_nanos() as u64);
+        assert_eq!(timeout, Duration::from_secs(60).as_nanos() as u64);
+    }
+
+    #[test]
+    fn consent_freshness_enable_disable_ffi() {
+        let _log = crate::tests::test_init_log();
+        let agent = Agent::builder().controlling(true).build();
+
+        let (interval, timeout) = agent.consent_freshness_config();
+        assert_eq!(interval, Duration::from_secs(5).as_nanos() as u64);
+        assert_eq!(timeout, Duration::from_secs(30).as_nanos() as u64);
+
+        agent.disable_consent_freshness();
+        agent.enable_consent_freshness();
+
+        let (interval, timeout) = agent.consent_freshness_config();
+        assert_eq!(interval, Duration::from_secs(5).as_nanos() as u64);
+        assert_eq!(timeout, Duration::from_secs(30).as_nanos() as u64);
+
+        agent.disable_consent_freshness();
+    }
+
+    #[test]
+    fn builder_consent_freshness_false() {
+        let _log = crate::tests::test_init_log();
+        let agent = Agent::builder()
+            .controlling(true)
+            .consent_freshness(false)
+            .build();
+        let _ = agent;
+    }
 }

@@ -466,4 +466,77 @@ mod tests {
         assert!(!ret.handled);
         assert!(!ret.have_more_data);
     }
+
+    #[test]
+    fn selected_pair_none_before_set() {
+        let _log = crate::tests::test_init_log();
+        let mut agent = Agent::builder().build();
+        let sid = agent.add_stream();
+        let mut s = agent.mut_stream(sid).unwrap();
+        let cid = s.add_component().unwrap();
+        let c = s.component(cid).unwrap();
+        assert!(c.selected_pair().is_none());
+    }
+
+    #[test]
+    fn set_selected_pair_identical_5tuple_succeeds() {
+        let _log = crate::tests::test_init_log();
+        let mut agent = Agent::builder().controlling(false).build();
+        let stream_id = agent.add_stream();
+        let mut stream = agent.mut_stream(stream_id).unwrap();
+        let component_id = stream.add_component().unwrap();
+        let local_addr = "127.0.0.1:1000".parse().unwrap();
+        let remote_addr = "127.0.0.1:2000".parse().unwrap();
+
+        let local = Candidate::builder(
+            component_id,
+            CandidateType::Host,
+            TransportType::Udp,
+            "0",
+            local_addr,
+        )
+        .build();
+        let remote = Candidate::builder(
+            component_id,
+            CandidateType::Host,
+            TransportType::Udp,
+            "0",
+            remote_addr,
+        )
+        .build();
+        let pair = CandidatePair::new(local.clone(), remote.clone());
+
+        let mut c = stream.mut_component(component_id).unwrap();
+        c.set_selected_pair(pair).unwrap();
+        assert!(c.selected_pair().is_some());
+        drop(c);
+
+        let pair2 = CandidatePair::new(local, remote);
+        let mut c = stream.mut_component(component_id).unwrap();
+        c.set_selected_pair(pair2).unwrap();
+        assert!(c.selected_pair().is_some());
+        assert_eq!(c.selected_pair().unwrap().local.base_address, local_addr);
+    }
+
+    #[test]
+    fn revoke_consent_sets_local_flag() {
+        let _log = crate::tests::test_init_log();
+        let mut agent = Agent::builder().build();
+        let sid = agent.add_stream();
+        let mut s = agent.mut_stream(sid).unwrap();
+        let cid = s.add_component().unwrap();
+        let mut c = s.mut_component(cid).unwrap();
+
+        c.revoke_consent();
+
+        let stream = agent.stream_state(sid).unwrap();
+        let cl_id = stream.checklist_id;
+        assert!(agent.checklistset.is_local_consent_revoked(cl_id, cid));
+    }
+
+    #[test]
+    fn component_state_accessor() {
+        let state = ComponentState::new(1);
+        assert_eq!(state.state(), ComponentConnectionState::New);
+    }
 }

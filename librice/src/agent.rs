@@ -570,4 +570,26 @@ mod tests {
         agent.set_ice_lite(false);
         assert!(!agent.ice_lite());
     }
+
+    #[test]
+    fn consent_freshness_enable_disable_librice() {
+        init();
+        #[cfg(feature = "runtime-tokio")]
+        let _runtime = crate::tests::tokio_runtime().enter();
+        let agent = Agent::default();
+
+        agent.enable_consent_freshness();
+
+        let (interval, timeout) = agent.consent_freshness_config();
+        assert_eq!(interval, Duration::from_secs(5));
+        assert_eq!(timeout, Duration::from_secs(30));
+
+        agent.set_consent_freshness_config(Duration::from_secs(10), Duration::from_secs(60));
+        let (interval, timeout) = agent.consent_freshness_config();
+        assert_eq!(interval, Duration::from_secs(10));
+        assert_eq!(timeout, Duration::from_secs(60));
+
+        agent.disable_consent_freshness();
+        agent.enable_consent_freshness();
+    }
 }

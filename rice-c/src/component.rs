@@ -273,4 +273,13 @@ mod tests {
         assert!(component.selected_pair().is_none());
         assert_eq!(component.state(), ComponentConnectionState::New);
     }
+
+    #[test]
+    fn component_revoke_consent() {
+        let _log = crate::tests::test_init_log();
+        let agent = Agent::default();
+        let stream = agent.add_stream();
+        let component = stream.add_component();
+        component.revoke_consent();
+    }
 }

@@ -3437,4 +3437,71 @@ mod tests {
             rice_credentials_free(credentials);
         }
     }
+
+    #[test]
+    fn rice_agent_consent_freshness_config_capi() {
+        unsafe {
+            let agent = rice_agent_new(true, false);
+
+            let mut interval: u64 = 0;
+            let mut timeout: u64 = 0;
+            rice_agent_get_consent_freshness_config(agent, &mut interval, &mut timeout);
+            assert_eq!(interval, Duration::from_secs(5).as_nanos() as u64);
+            assert_eq!(timeout, Duration::from_secs(30).as_nanos() as u64);
+
+            rice_agent_set_consent_freshness_config(
+                agent,
+                Duration::from_secs(10).as_nanos() as u64,
+                Duration::from_secs(60).as_nanos() as u64,
+            );
+
+            let mut interval: u64 = 0;
+            let mut timeout: u64 = 0;
+            rice_agent_get_consent_freshness_config(agent, &mut interval, &mut timeout);
+            assert_eq!(interval, Duration::from_secs(10).as_nanos() as u64);
+            assert_eq!(timeout, Duration::from_secs(60).as_nanos() as u64);
+
+            rice_agent_unref(agent);
+        }
+    }
+
+    #[test]
+    fn rice_agent_consent_freshness_enable_disable_capi() {
+        unsafe {
+            let agent = rice_agent_new(true, false);
+
+            let mut interval: u64 = 0;
+            let mut timeout: u64 = 0;
+            rice_agent_get_consent_freshness_config(agent, &mut interval, &mut timeout);
+            assert_eq!(interval, Duration::from_secs(5).as_nanos() as u64);
+            assert_eq!(timeout, Duration::from_secs(30).as_nanos() as u64);
+
+            rice_agent_disable_consent_freshness(agent);
+
+            rice_agent_enable_consent_freshness(agent);
+
+            let mut interval: u64 = 0;
+            let mut timeout: u64 = 0;
+            rice_agent_get_consent_freshness_config(agent, &mut interval, &mut timeout);
+            assert_eq!(interval, Duration::from_secs(5).as_nanos() as u64);
+            assert_eq!(timeout, Duration::from_secs(30).as_nanos() as u64);
+
+            rice_agent_unref(agent);
+        }
+    }
+
+    #[test]
+    fn rice_component_revoke_consent_capi() {
+        unsafe {
+            let agent = rice_agent_new(true, false);
+            let stream = rice_agent_add_stream(agent);
+            let component = rice_stream_add_component(stream);
+
+            rice_component_revoke_consent(component);
+
+            rice_component_unref(component);
+            rice_stream_unref(stream);
+            rice_agent_unref(agent);
+        }
+    }
 }
