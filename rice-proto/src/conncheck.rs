@@ -8708,4 +8708,308 @@ mod tests {
             unreachable!();
         };
     }
+
+    #[test]
+    fn consent_revocation_returns_403_on_incoming_binding_request() {
+        let _log = crate::tests::test_init_log();
+        let mut state = FineControl::builder().build();
+        let now = Instant::ZERO;
+
+        let pair = CandidatePair::new(
+            state.local.peer.candidate.clone(),
+            state.remote.candidate.clone(),
+        );
+        let check_id = state
+            .local_list()
+            .matching_check(&pair, Nominate::False)
+            .unwrap()
+            .conncheck_id;
+
+        let CheckListSetPollRet::Event {
+            checklist_id: _,
+            event: ConnCheckEvent::ComponentState(_cid, ComponentConnectionState::Connecting),
+        } = state.local.checklist_set.poll(now)
+        else {
+            unreachable!();
+        };
+
+        send_next_check_and_response(&state.local.peer, &state.remote)
+            .perform(&mut state.local.checklist_set, now);
+        let c = state.local_list().check_by_id(check_id).unwrap();
+        assert_eq!(c.state(), CandidatePairState::Succeeded);
+
+        let now = wait_advance(&mut state.local.checklist_set, now);
+
+        state
+            .local
+            .checklist_set
+            .revoke_local_consent(state.local.checklist_id, 1);
+
+        let (mut remote_agent, _remote_auth, _local_auth) = state.remote.stun_agent();
+        let local_addr = state.local.peer.candidate.base_address;
+        let transmit = remote_generate_check(
+            &state.remote,
+            &mut remote_agent,
+            local_addr,
+            false,
+            false,
+            now,
+        );
+
+        let reply =
+            state
+                .local
+                .checklist_set
+                .incoming_data(state.local.checklist_id, 1, transmit, now);
+        assert!(reply.handled);
+
+        let Some(transmit) = state.local.checklist_set.poll_transmit(now) else {
+            panic!("Expected a 403 error response transmit");
+        };
+        let response = Message::from_bytes(&transmit.transmit.data).unwrap();
+        assert!(response.has_class(MessageClass::Error));
+        let error_code = response.attribute::<ErrorCode>().unwrap().code();
+        assert_eq!(error_code, ErrorCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn consent_revocation_drops_application_data() {
+        let _log = crate::tests::test_init_log();
+        let mut state = FineControl::builder().build();
+        let now = Instant::ZERO;
+
+        let pair = CandidatePair::new(
+            state.local.peer.candidate.clone(),
+            state.remote.candidate.clone(),
+        );
+        let check_id = state
+            .local_list()
+            .matching_check(&pair, Nominate::False)
+            .unwrap()
+            .conncheck_id;
+
+        let CheckListSetPollRet::Event {
+            checklist_id: _,
+            event: ConnCheckEvent::ComponentState(_cid, ComponentConnectionState::Connecting),
+        } = state.local.checklist_set.poll(now)
+        else {
+            unreachable!();
+        };
+
+        send_next_check_and_response(&state.local.peer, &state.remote)
+            .perform(&mut state.local.checklist_set, now);
+        let c = state.local_list().check_by_id(check_id).unwrap();
+        assert_eq!(c.state(), CandidatePairState::Succeeded);
+
+        let now = wait_advance(&mut state.local.checklist_set, now);
+
+        state
+            .local
+            .checklist_set
+            .revoke_local_consent(state.local.checklist_id, 1);
+
+        let non_stun_data = vec![0x00, 0x01, 0x02, 0x03];
+        let transmit = Transmit::new(
+            non_stun_data,
+            TransportType::Udp,
+            state.remote.candidate.address,
+            state.local.peer.candidate.address,
+        );
+        let reply =
+            state
+                .local
+                .checklist_set
+                .incoming_data(state.local.checklist_id, 1, transmit, now);
+
+        assert!(reply.handled);
+        assert!(reply.data.is_none());
+    }
+
+    #[test]
+    fn consent_check_send_via_add_consent_check() {
+        let _log = crate::tests::test_init_log();
+        let mut set = ConnCheckListSet::builder(42, true).build();
+
+        let cl_id = set.new_list();
+        let cl = set.mut_list(cl_id).unwrap();
+        cl.add_component(1);
+
+        let local_creds = Credentials::new("lufrag".into(), "lpwd".into());
+        let remote_creds = Credentials::new("rufrag".into(), "rpwd".into());
+
+        cl.set_local_credentials(local_creds.clone());
+        cl.set_remote_credentials(remote_creds.clone());
+
+        let local_addr: SocketAddr = "127.0.0.1:1000".parse().unwrap();
+        let remote_addr: SocketAddr = "127.0.0.1:2000".parse().unwrap();
+        let local_cand =
+            Candidate::builder(1, CandidateType::Host, TransportType::Udp, "0", local_addr)
+                .priority(1234)
+                .build();
+
+        cl.add_local_candidate(local_cand.clone());
+        let _ = cl;
+
+        let now = Instant::ZERO;
+        loop {
+            match set.poll(now) {
+                CheckListSetPollRet::WaitUntil(_) => break,
+                CheckListSetPollRet::Event { .. } => {}
+                other => panic!("expected event or WaitUntil, got {other:?}"),
+            }
+        }
+
+        let request = generate_binding_request(
+            1234,
+            false,
+            true,
+            42,
+            local_creds.clone(),
+            remote_creds.clone(),
+        )
+        .unwrap();
+
+        let request_msg = Message::from_bytes(&request).unwrap();
+        assert!(request_msg.has_method(BINDING));
+        assert!(request_msg.has_class(MessageClass::Request));
+
+        set.add_consent_check(local_cand, cl_id, 1, request.to_vec(), remote_addr);
+
+        match set.poll(now) {
+            CheckListSetPollRet::WaitUntil(_) => {}
+            other => panic!("expected WaitUntil after add_consent_check, got {other:?}"),
+        }
+
+        let Some(transmit) = set.poll_transmit(now) else {
+            panic!("Expected a consent check transmit");
+        };
+
+        let tx_msg = Message::from_bytes(&transmit.transmit.data).unwrap();
+        assert!(tx_msg.has_method(BINDING));
+        assert!(tx_msg.has_class(MessageClass::Request));
+        assert_eq!(transmit.transmit.to, remote_addr);
+
+        let request_data = &transmit.transmit.data;
+        let request_msg2 = Message::from_bytes(request_data).unwrap();
+        let mut response = Message::builder_success(&request_msg2, MessageWriteVec::new());
+
+        response
+            .add_message_integrity(
+                &MessageIntegrityCredentials::ShortTerm(remote_creds.clone().into()),
+                IntegrityAlgorithm::Sha1,
+            )
+            .unwrap();
+        response.add_fingerprint().unwrap();
+        let response_data = response.finish();
+
+        let response_tx = Transmit::new(response_data, TransportType::Udp, remote_addr, local_addr);
+        let reply = set.incoming_data(cl_id, 1, response_tx, now);
+        assert!(reply.handled);
+
+        match set.poll(now) {
+            CheckListSetPollRet::Event {
+                event: ConnCheckEvent::ConsentResponseReceived(cid, revoked),
+                ..
+            } => {
+                assert_eq!(cid, 1);
+                assert!(
+                    !revoked,
+                    "Expected consent refreshed (success), not revoked"
+                );
+            }
+            other => panic!("Expected ConsentResponseReceived, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn consent_check_receive_403_drains_response() {
+        let _log = crate::tests::test_init_log();
+        let mut set = ConnCheckListSet::builder(42, true).build();
+
+        let cl_id = set.new_list();
+        let cl = set.mut_list(cl_id).unwrap();
+        cl.add_component(1);
+
+        let local_creds = Credentials::new("lufrag".into(), "lpwd".into());
+        let remote_creds = Credentials::new("rufrag".into(), "rpwd".into());
+
+        cl.set_local_credentials(local_creds.clone());
+        cl.set_remote_credentials(remote_creds.clone());
+
+        let local_addr: SocketAddr = "127.0.0.1:1000".parse().unwrap();
+        let remote_addr: SocketAddr = "127.0.0.1:2000".parse().unwrap();
+        let local_cand =
+            Candidate::builder(1, CandidateType::Host, TransportType::Udp, "0", local_addr)
+                .priority(1234)
+                .build();
+
+        cl.add_local_candidate(local_cand.clone());
+        let _ = cl;
+
+        let now = Instant::ZERO;
+        loop {
+            match set.poll(now) {
+                CheckListSetPollRet::WaitUntil(_) => break,
+                CheckListSetPollRet::Event { .. } => {}
+                other => panic!("expected event or WaitUntil, got {other:?}"),
+            }
+        }
+
+        let request = generate_binding_request(
+            1234,
+            false,
+            true,
+            42,
+            local_creds.clone(),
+            remote_creds.clone(),
+        )
+        .unwrap();
+
+        set.add_consent_check(local_cand, cl_id, 1, request.to_vec(), remote_addr);
+
+        match set.poll(now) {
+            CheckListSetPollRet::WaitUntil(_) => {}
+            other => panic!("expected WaitUntil after add_consent_check, got {other:?}"),
+        }
+
+        let Some(transmit) = set.poll_transmit(now) else {
+            panic!("Expected a consent check transmit");
+        };
+        assert_eq!(transmit.transmit.to, remote_addr);
+
+        let request_data = &transmit.transmit.data;
+        let request_msg2 = Message::from_bytes(request_data).unwrap();
+        let mut response = Message::builder_error(&request_msg2, MessageWriteVec::new());
+        let error_code = ErrorCode::builder(ErrorCode::FORBIDDEN).build().unwrap();
+        response.add_attribute(&error_code).unwrap();
+        response
+            .add_message_integrity(
+                &MessageIntegrityCredentials::ShortTerm(remote_creds.clone().into()),
+                IntegrityAlgorithm::Sha1,
+            )
+            .unwrap();
+        response.add_fingerprint().unwrap();
+        let response_data = response.finish();
+
+        let response_tx = Transmit::new(response_data, TransportType::Udp, remote_addr, local_addr);
+        let reply = set.incoming_data(cl_id, 1, response_tx, now);
+        assert!(reply.handled);
+
+        match set.poll(now) {
+            CheckListSetPollRet::Event {
+                event: ConnCheckEvent::ConsentResponseReceived(cid, revoked),
+                ..
+            } => {
+                assert_eq!(cid, 1);
+                assert!(revoked, "Expected consent revoked (403 response)");
+            }
+            other => panic!("Expected ConsentResponseReceived, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tie_breaker_accessor() {
+        let set = ConnCheckListSet::builder(42, true).build();
+        assert_eq!(set.tie_breaker(), 42);
+    }
 }

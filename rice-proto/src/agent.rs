@@ -1171,4 +1171,50 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn consent_freshness_enable_disable() {
+        let _log = crate::tests::test_init_log();
+
+        let mut agent = Agent::builder().consent_freshness(false).build();
+        assert!(!agent.is_consent_freshness_enabled());
+
+        agent.enable_consent_freshness();
+        assert!(agent.is_consent_freshness_enabled());
+
+        agent.disable_consent_freshness();
+        assert!(!agent.is_consent_freshness_enabled());
+    }
+
+    #[test]
+    fn consent_freshness_config_get_set() {
+        let _log = crate::tests::test_init_log();
+
+        let mut agent = Agent::builder().build();
+
+        let cfg = agent.consent_freshness_config().unwrap();
+        assert_eq!(cfg.interval, consent::Config::default().interval);
+        assert_eq!(cfg.timeout, consent::Config::default().timeout);
+
+        let new_cfg = consent::Config {
+            interval: Duration::from_secs(10),
+            timeout: Duration::from_secs(60),
+        };
+        agent.set_consent_freshness_config(new_cfg.clone());
+
+        let read_cfg = agent.consent_freshness_config().unwrap();
+        assert_eq!(read_cfg.interval, Duration::from_secs(10));
+        assert_eq!(read_cfg.timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn consent_freshness_close() {
+        let _log = crate::tests::test_init_log();
+
+        let mut agent = Agent::builder().build();
+        assert!(agent.is_consent_freshness_enabled());
+
+        let now = Instant::ZERO;
+        agent.close(now);
+    }
 }
