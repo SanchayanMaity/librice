@@ -25,7 +25,7 @@ turn-server-proto = { version = "0.7.0", default-features = false }
 
 arbitrary = { version = "1", features = ["derive"] }
 byteorder = { version = "1", default-features = false }
-criterion = "0.6"
+criterion = "0.8"
 if-addrs = "0.15"
 smallvec = "1"
 thiserror = { version = "2", default-features = false }
